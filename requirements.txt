@@ -1,0 +1,5 @@
+jax==0.4.26
+jaxlib==0.4.26
+numpy
+# Optional, for Apple Silicon GPU (see README); this pin matches jax 0.4.26:
+# jax-metal==0.1.0

@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+
+# Intermediate / large scan output
+scan_results.json
+scan_viewer.html
+# Generated viewer (regenerate with `python make_viewer.py`)
+viewer.html
