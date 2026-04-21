@@ -308,6 +308,192 @@ fn new_face_conflicts(f: [u32; 3], committed_faces: &[[u32; 3]], verts: &[Vec3])
 // Options + statistics
 // ============================================================================
 
+// ============================================================================
+// Leaf: try to extract a K_N polyhedron
+// ============================================================================
+//
+// At a depth-target leaf we have `verts.len() == N` and some set of
+// committed faces (at least the two anchor ones).  To determine if a
+// polyhedron can be built from this vertex configuration:
+//
+//   1. Compute the pierces matrix — for every (edge, non-incident
+//      triangle) pair, does the edge pierce the triangle's interior?
+//   2. A triangle is "clean" iff no non-incident edge pierces it.
+//      Only clean triangles can be faces of the final polyhedron.
+//   3. Coverage check: every edge must appear in >= 2 clean triangles
+//      (since every edge of a K_N neighborly triangulation is in
+//      exactly 2 faces).  If not, give up immediately.
+//   4. Combinatorial face selection: backtrack over clean triangles,
+//      tracking per-edge face count (must land at exactly 2 for
+//      every edge and exactly `target_F` total faces).  The already
+//      committed faces are forced picks; the search explores which
+//      of the remaining clean triangles to include.
+
+fn combo(n: usize, k: usize) -> usize {
+    if k > n { return 0; }
+    let mut r = 1usize;
+    for i in 0..k { r = r * (n - i) / (i + 1); }
+    r
+}
+
+fn extract_polyhedron(
+    verts: &[Vec3],
+    committed_faces: &[[u32; 3]],
+) -> (usize, Option<Vec<[u32; 3]>>) {
+    let n = verts.len();
+    let target_f = n * (n - 1) / 3;
+    let tol = 1e-9;
+
+    // Enumerate all triangles (sorted vertex triples).
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(combo(n, 3));
+    for a in 0..n { for b in (a+1)..n { for c in (b+1)..n {
+        triangles.push([a as u32, b as u32, c as u32]);
+    }}}
+
+    // For each triangle, check every non-incident edge.  Mark the
+    // triangle "clean" only if no such edge pierces its interior.
+    let mut clean: Vec<bool> = vec![true; triangles.len()];
+    for (ti, &[a, b, c]) in triangles.iter().enumerate() {
+        let A = &verts[a as usize]; let B = &verts[b as usize]; let C = &verts[c as usize];
+        for x in 0..n {
+            for y in (x+1)..n {
+                let xu = x as u32; let yu = y as u32;
+                if xu == a || xu == b || xu == c { continue; }
+                if yu == a || yu == b || yu == c { continue; }
+                if seg_crosses_tri(&verts[x], &verts[y], A, B, C, tol) {
+                    clean[ti] = false;
+                    break;
+                }
+            }
+            if !clean[ti] { break; }
+        }
+    }
+
+    let clean_set: Vec<[u32; 3]> = triangles.iter().enumerate()
+        .filter(|&(i, _)| clean[i]).map(|(_, t)| *t).collect();
+    let n_clean = clean_set.len();
+    if n_clean < target_f { return (n_clean, None); }
+
+    // Coverage check: each edge must have at least 2 clean triangles.
+    let mut tris_per_edge: std::collections::HashMap<(u32, u32), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, &[a, b, c]) in clean_set.iter().enumerate() {
+        for (u, v) in [(a, b), (b, c), (a, c)] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            tris_per_edge.entry(key).or_default().push(idx);
+        }
+    }
+    // Every edge of K_N must be covered.
+    for a in 0..n as u32 {
+        for b in (a+1)..n as u32 {
+            if tris_per_edge.get(&(a, b)).map(|v| v.len()).unwrap_or(0) < 2 {
+                return (n_clean, None);
+            }
+        }
+    }
+
+    // Backtracking selection.
+    // `must_include`: committed faces that MUST be in the final set.
+    // Filter out any that aren't in clean_set (shouldn't happen if the
+    // commitments were ever valid, but we guard anyway).
+    let clean_index: std::collections::HashMap<[u32; 3], usize> =
+        clean_set.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+    let mut forced: Vec<usize> = Vec::new();
+    for f in committed_faces {
+        let mut s = *f; s.sort();
+        if let Some(&idx) = clean_index.get(&s) { forced.push(idx); } else {
+            return (n_clean, None); // committed face isn't clean — impossible
+        }
+    }
+
+    let mut selected: Vec<bool> = vec![false; clean_set.len()];
+    let mut edge_count: std::collections::HashMap<(u32, u32), u8> =
+        std::collections::HashMap::new();
+    for &idx in &forced {
+        selected[idx] = true;
+        let [a, b, c] = clean_set[idx];
+        for (u, v) in [(a, b), (b, c), (a, c)] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            let e = edge_count.entry(key).or_insert(0);
+            *e += 1;
+            if *e > 2 { return (n_clean, None); }
+        }
+    }
+
+    let n_selected_forced = forced.len();
+    let mut count = n_selected_forced;
+    let mut budget: u64 = 2_000_000;
+    if backtrack(&mut selected, &clean_set, &tris_per_edge, n,
+                  &mut edge_count, &mut count, target_f, 0, &mut budget) {
+        let out: Vec<[u32; 3]> = selected.iter().enumerate()
+            .filter(|&(_, &b)| b).map(|(i, _)| clean_set[i]).collect();
+        return (n_clean, Some(out));
+    }
+    (n_clean, None)
+}
+
+fn backtrack(
+    selected: &mut [bool],
+    clean: &[[u32; 3]],
+    tris_per_edge: &std::collections::HashMap<(u32, u32), Vec<usize>>,
+    n_verts: usize,
+    edge_count: &mut std::collections::HashMap<(u32, u32), u8>,
+    count: &mut usize,
+    target: usize,
+    start: usize,
+    budget: &mut u64,
+) -> bool {
+    if *budget == 0 { return false; }
+    *budget -= 1;
+    if *count == target {
+        return edge_count.values().all(|&c| c == 2);
+    }
+    if start >= clean.len() { return false; }
+
+    // Forward-check: for every edge with count < 2, the edges'
+    // remaining clean triangles starting at `start` must be enough
+    // to bring the count to 2.
+    for a in 0..n_verts as u32 {
+        for b in (a+1)..n_verts as u32 {
+            let ec = *edge_count.get(&(a, b)).unwrap_or(&0);
+            if ec >= 2 { continue; }
+            let need = 2 - ec;
+            let tris = tris_per_edge.get(&(a, b));
+            let remaining = if let Some(v) = tris {
+                v.iter().filter(|&&i| i >= start && !selected[i]).count()
+            } else { 0 };
+            if (remaining as u8) < need { return false; }
+        }
+    }
+
+    // Include branch
+    if !selected[start] {
+        let [a, b, c] = clean[start];
+        let keys = [
+            if a < b { (a, b) } else { (b, a) },
+            if b < c { (b, c) } else { (c, b) },
+            if a < c { (a, c) } else { (c, a) },
+        ];
+        let mut ok = true;
+        for k in &keys {
+            if *edge_count.get(k).unwrap_or(&0) >= 2 { ok = false; break; }
+        }
+        if ok {
+            for k in &keys { *edge_count.entry(*k).or_insert(0) += 1; }
+            selected[start] = true; *count += 1;
+            if backtrack(selected, clean, tris_per_edge, n_verts, edge_count,
+                          count, target, start + 1, budget) {
+                return true;
+            }
+            selected[start] = false; *count -= 1;
+            for k in &keys { *edge_count.entry(*k).or_insert(0) -= 1; }
+        }
+    }
+    // Skip branch
+    backtrack(selected, clean, tris_per_edge, n_verts, edge_count,
+               count, target, start + 1, budget)
+}
+
 #[derive(Clone, Copy)]
 struct Opts {
     target: usize,
@@ -321,11 +507,15 @@ struct Stats {
     face_subsets_at_level: Vec<Vec<usize>>,
     complete: u64,
     nodes_expanded: u64,
+    best_clean: usize,
+    poly_found: u64,
+    best_poly: Option<Vec<[u32; 3]>>,
 }
 impl Stats {
     fn new() -> Self { Stats {
         cells_at_level: Vec::new(), face_subsets_at_level: Vec::new(),
         complete: 0, nodes_expanded: 0,
+        best_clean: 0, poly_found: 0, best_poly: None,
     }}
     fn record_cells(&mut self, lvl: usize, n: usize) {
         while self.cells_at_level.len() <= lvl { self.cells_at_level.push(Vec::new()); }
@@ -351,7 +541,16 @@ fn dfs(
     if opts.first_only && stats.complete > 0 { return; }
 
     let i = verts.len() as u32;
-    if verts.len() == opts.target { stats.complete += 1; return; }
+    if verts.len() == opts.target {
+        stats.complete += 1;
+        let (n_clean, poly) = extract_polyhedron(verts, committed_faces);
+        if n_clean > stats.best_clean { stats.best_clean = n_clean; }
+        if poly.is_some() {
+            stats.poly_found += 1;
+            if stats.best_poly.is_none() { stats.best_poly = poly; }
+        }
+        return;
+    }
 
     let lvl = (verts.len() - 4) as usize;
 
@@ -412,22 +611,57 @@ fn subsets_dfs(
         dfs(verts, committed_faces, edge_face_count, opts, stats);
         return;
     }
-    // skip this potential face
-    subsets_dfs(i, idx + 1, potential, verts, committed_faces, edge_face_count,
-                 subsets_at_cell, opts, stats);
-    // include this potential face, if constraints pass
-    let (j, k) = potential[idx];
-    let face = [i, j, k];
-    if edge_face_count.get(j, k) >= 2 { return; }
-    if edge_face_count.get(i, j) >= 2 { return; }
-    if edge_face_count.get(i, k) >= 2 { return; }
-    if new_face_conflicts(face, committed_faces, verts) { return; }
-    edge_face_count.inc_face(face);
-    committed_faces.push(face);
-    subsets_dfs(i, idx + 1, potential, verts, committed_faces, edge_face_count,
-                 subsets_at_cell, opts, stats);
-    committed_faces.pop();
-    edge_face_count.dec_face(face);
+
+    // In `first_only` mode, bias the order to alternate include/skip
+    // at every other potential face, so the first subset picked is
+    // "middle-density" rather than all-empty or all-full.
+    // Specifically: at even `idx` try INCLUDE first; at odd `idx` try
+    // SKIP first.  This gives roughly half the faces committed (among
+    // the ones that pass the geometric/edge-budget constraints).
+    let include_first = opts.first_only && (idx % 2 == 0);
+
+    let skip_branch = |
+        committed_faces: &mut Vec<[u32; 3]>,
+        edge_face_count: &mut EdgeFaceCount,
+        subsets_at_cell: &mut u64,
+        stats: &mut Stats,
+        verts: &mut Vec<Vec3>,
+    | {
+        subsets_dfs(i, idx + 1, potential, verts, committed_faces, edge_face_count,
+                     subsets_at_cell, opts, stats);
+    };
+
+    let include_branch = |
+        committed_faces: &mut Vec<[u32; 3]>,
+        edge_face_count: &mut EdgeFaceCount,
+        subsets_at_cell: &mut u64,
+        stats: &mut Stats,
+        verts: &mut Vec<Vec3>,
+    | -> bool {
+        let (j, k) = potential[idx];
+        let face = [i, j, k];
+        if edge_face_count.get(j, k) >= 2 { return false; }
+        if edge_face_count.get(i, j) >= 2 { return false; }
+        if edge_face_count.get(i, k) >= 2 { return false; }
+        if new_face_conflicts(face, committed_faces, verts) { return false; }
+        edge_face_count.inc_face(face);
+        committed_faces.push(face);
+        subsets_dfs(i, idx + 1, potential, verts, committed_faces, edge_face_count,
+                     subsets_at_cell, opts, stats);
+        committed_faces.pop();
+        edge_face_count.dec_face(face);
+        true
+    };
+
+    if include_first {
+        include_branch(committed_faces, edge_face_count, subsets_at_cell, stats, verts);
+        if opts.first_only && stats.complete > 0 { return; }
+        skip_branch(committed_faces, edge_face_count, subsets_at_cell, stats, verts);
+    } else {
+        skip_branch(committed_faces, edge_face_count, subsets_at_cell, stats, verts);
+        if opts.first_only && stats.complete > 0 { return; }
+        include_branch(committed_faces, edge_face_count, subsets_at_cell, stats, verts);
+    }
 }
 
 // ============================================================================
@@ -467,6 +701,11 @@ fn main() {
              elapsed.as_secs_f64(), target, commit_until, box_size, first_only);
     println!("  nodes_expanded = {}", stats.nodes_expanded);
     println!("  complete configs = {}", stats.complete);
+    println!("  best clean = {}", stats.best_clean);
+    println!("  polyhedra found = {}", stats.poly_found);
+    if let Some(ref f) = stats.best_poly {
+        println!("  first polyhedron: {} faces", f.len());
+    }
     for (lvl, cs) in stats.cells_at_level.iter().enumerate() {
         if cs.is_empty() { continue; }
         let total: usize = cs.iter().sum();
