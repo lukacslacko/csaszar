@@ -10,3 +10,11 @@ scan_viewer.html
 # Generated viewer (regenerate with `python make_viewer.py`)
 viewer.html
 n12_viewer.html
+
+# Scan tmp files
+_n12_s*
+scan.log
+scan_par.log
+rot6.log
+intensive.log
+n12_deep*
