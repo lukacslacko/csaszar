@@ -83,9 +83,10 @@ python make_viewer.py && open viewer.html
 
 | file              | purpose                                                                 |
 |-------------------|-------------------------------------------------------------------------|
-| `csaszar.py`      | greedy face selection + two-phase parallel optimization                 |
+| `csaszar.py`      | greedy face selection + two-phase parallel optimization (fixed V=7)     |
+| `neighborly.py`   | generalized phase-1-only pipeline parameterized by `--n V`              |
 | `scan_polish.py`  | weight-grid scan of the symmetric polish loss, writes `scan_viewer.html` |
-| `make_viewer.py`  | render `csaszar.json` into a standalone `viewer.html`                   |
+| `make_viewer.py`  | render a `*.json` into a standalone HTML viewer                         |
 | `csaszar.obj`     | OBJ export of the saved polyhedron                                      |
 | `csaszar.json`    | vertex coordinates + faces + angle statistics                           |
 
@@ -96,6 +97,16 @@ python make_viewer.py && open viewer.html
 - **Collinearity objective.** For every (vertex, pair-of-incident-edges) triple — 7 · C(6, 2) = 105 in total — penalize cos² of the angle between the two edge directions. This prevents 3+ vertices from lining up and prevents vertex links from degenerating.
 - **Gauge fix.** The intersection and angle objectives are affine-invariant, so the polyhedron can drift in scale/rotation without changing the loss. Between chunks of Adam steps we therefore run a PCA normalization (center, rotate to principal axes, scale each axis to [−1, 1]) — a projection onto a canonical gauge that also prevents the polyhedron from degenerating onto a plane.
 
-## JAX backend
+## Bonus: the next rung — V=12, genus 6
 
-CPU is faster than jax-metal for this problem size. If you want to try Metal anyway: `JAX_PLATFORMS=metal python csaszar.py --no-scan ...`. `lax.scan` hangs under jax-metal (as of 0.1.0), hence `--no-scan` which drops to a Python step loop.
+`neighborly.py` is a generalized version of the pipeline that takes `--n V`. After V=7 (Csaszar, genus 1) the next vertex count for which `K_V` can be neighborly-triangulated on an orientable surface is **V=12**, giving `E=66`, `F=44`, `chi=-10`, **genus 6** (six holes).
+
+```sh
+JAX_PLATFORMS=cpu python neighborly.py --n 12 --batch 256 --steps 4000 \
+    --structure-tries 500 --allow-pseudomanifold --out n12
+python make_viewer.py n12.json n12_viewer.html && open n12_viewer.html
+```
+
+Status as of this repo: **open problem, not solved**. Manifold triangulations of `K_12` on genus 6 exist combinatorially (Ringel) but are a tiny sliver of the ways to pick 44 triangles with each edge in 2 faces — the greedy sampler from `csaszar.py` finds 44-face pseudo-manifolds (pinched vertices) roughly 3% of the time and true 2-manifolds essentially never. `--allow-pseudomanifold` lets you proceed with pinched face sets anyway; parallel Adam drives those down to **27–33 self-intersections** depending on the specific combinatorial structure, but never to 0 — the pinched-vertex cones cannot separate geometrically. Running the same pipeline against a true manifold triangulation (not produced by this repo) is the next step for someone who wants to push on this.
+
+The default `neighborly.py --n 7` reproduces the Csaszar flow end-to-end.

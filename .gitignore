@@ -9,3 +9,4 @@ scan_results.json
 scan_viewer.html
 # Generated viewer (regenerate with `python make_viewer.py`)
 viewer.html
+n12_viewer.html
