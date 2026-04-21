@@ -10,6 +10,7 @@ scan_viewer.html
 # Generated viewer (regenerate with `python make_viewer.py`)
 viewer.html
 n12_viewer.html
+sym*_viewer.html
 
 # Scan tmp files
 _n12_s*
