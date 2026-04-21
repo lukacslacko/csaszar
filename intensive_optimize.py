@@ -128,6 +128,9 @@ def main():
                         "structures across workers.")
     ap.add_argument("--top-k", type=int, default=8,
                     help="When reading a pickle, run this many top-ranked structures.")
+    ap.add_argument("--skip-k", type=int, default=0,
+                    help="When reading a pickle, skip this many top-ranked structures "
+                         "(use to resume after an earlier --top-k N pass).")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--seeds-per-worker", type=int, default=1,
                     help="When reading a single JSON, # random inits per worker.")
@@ -149,10 +152,12 @@ def main():
         import pickle as _pickle
         with open(args.pickle, "rb") as fh:
             ranked = _pickle.load(fh)
-        top = ranked[:args.top_k]
-        print(f"Read {len(ranked)} structures from {args.pickle}; using top {len(top)}:")
-        for i, r in enumerate(top):
-            tag = f"pickle#{i}_pinch{r['pinch_count']}_excess{r['excess_components']}"
+        slice_ = ranked[args.skip_k: args.skip_k + args.top_k]
+        print(f"Read {len(ranked)} structures from {args.pickle}; "
+              f"using {args.skip_k}..{args.skip_k + len(slice_)}:")
+        for i, r in enumerate(slice_):
+            idx = args.skip_k + i
+            tag = f"pickle#{idx}_pinch{r['pinch_count']}_excess{r['excess_components']}"
             print(f"  {tag}")
             structures.append((tag, [list(f) for f in r["faces"]]))
     else:
