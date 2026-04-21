@@ -3,9 +3,16 @@ name = "csaszar_cells"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "cells"
 path = "src/main.rs"
+
+[[bin]]
+name = "cells2"
+path = "src/cells2/main.rs"
 
 [profile.release]
 opt-level = 3

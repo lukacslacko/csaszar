@@ -232,31 +232,98 @@ impl Arrangement {
         Arrangement { planes, cells: vec![box_cell] }
     }
     fn add_plane(&mut self, plane: Plane, tol: f64) {
+        let t_plane = Instant::now();
+        let mut last_inner = t_plane;
         let plane_id = self.planes.len() as u32;
         self.planes.push(plane);
         let old = std::mem::take(&mut self.cells);
-        let mut new_cells: Vec<Cell> = Vec::with_capacity(old.len() * 2);
-        for c in old {
+        let old_len = old.len();
+        let mut new_cells: Vec<Cell> = Vec::with_capacity(old_len * 2);
+        let mut max_seen_verts: usize = 0;
+        for (idx, c) in old.into_iter().enumerate() {
+            let pre_v = c.vertices.len();
+            if pre_v > max_seen_verts { max_seen_verts = pre_v; }
+            let t_cell = Instant::now();
             match c.split_by(&plane, plane_id, tol) {
-                SplitResult::NoSplit(c) => new_cells.push(c),
-                SplitResult::Split(a, b) => { new_cells.push(a); new_cells.push(b); }
+                SplitResult::NoSplit(c) => {
+                    let dt = t_cell.elapsed().as_secs_f64();
+                    if dt > 0.5 {
+                        eprintln!("    [split] slow NoSplit cell idx={}/{} v_before={} v_after={} t={:.2}s",
+                                  idx, old_len, pre_v, c.vertices.len(), dt);
+                    }
+                    new_cells.push(c);
+                }
+                SplitResult::Split(a, b) => {
+                    let dt = t_cell.elapsed().as_secs_f64();
+                    if dt > 0.5 {
+                        eprintln!("    [split] slow Split cell idx={}/{} v_before={} v_out={}+{} t={:.2}s",
+                                  idx, old_len, pre_v, a.vertices.len(), b.vertices.len(), dt);
+                    }
+                    new_cells.push(a); new_cells.push(b);
+                }
+            }
+            if last_inner.elapsed().as_secs_f64() >= 1.0 {
+                eprintln!("    [inner] cells_done={}/{} new_cells_so_far={} max_v={} t_plane={:.2}s",
+                          idx + 1, old_len, new_cells.len(), max_seen_verts,
+                          t_plane.elapsed().as_secs_f64());
+                last_inner = Instant::now();
             }
         }
         self.cells = new_cells;
     }
 }
 
-fn build_arrangement(verts: &[Vec3], box_size: f64) -> Arrangement {
+fn current_rss_bytes() -> u64 {
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) == 0 {
+            // macOS: ru_maxrss is in bytes; Linux: kilobytes.
+            #[cfg(target_os = "macos")]
+            { return usage.ru_maxrss as u64; }
+            #[cfg(not(target_os = "macos"))]
+            { return (usage.ru_maxrss as u64).saturating_mul(1024); }
+        }
+    }
+    0
+}
+
+/// Build arrangement.  If `mem_limit_bytes` is Some, RSS is polled
+/// after every added plane; exceeding it returns None.  No hard cell
+/// or vertex count caps — we rely on the RSS check to abort before OOM.
+/// Emits a heartbeat line to stderr if the build takes >1s, showing
+/// per-plane progress every 500ms.
+fn build_arrangement(
+    verts: &[Vec3], box_size: f64, mem_limit_bytes: Option<u64>,
+) -> Option<Arrangement> {
+    let t_start = Instant::now();
+    let mut last_print = t_start;
     let mut arr = Arrangement::new(box_size);
     let n = verts.len();
+    let total_planes = n * (n - 1) * (n - 2) / 6;
+    let mut plane_idx: usize = 0;
     for i in 0..n {
         for j in (i+1)..n {
             for k in (j+1)..n {
                 arr.add_plane(Plane::through(&verts[i], &verts[j], &verts[k]), 1e-9);
+                plane_idx += 1;
+                if let Some(lim) = mem_limit_bytes {
+                    if current_rss_bytes() > lim { return None; }
+                }
+                let elapsed = t_start.elapsed().as_secs_f64();
+                if elapsed > 1.0 && last_print.elapsed().as_secs_f64() >= 0.5 {
+                    eprintln!("  [arr placed={}] plane {}/{} cells={} t={:.2}s rss={:.2}GB",
+                              n, plane_idx, total_planes, arr.cells.len(), elapsed,
+                              current_rss_bytes() as f64 / (1024.0*1024.0*1024.0));
+                    last_print = Instant::now();
+                }
             }
         }
     }
-    arr
+    let total = t_start.elapsed().as_secs_f64();
+    if total > 1.0 {
+        eprintln!("  [arr done placed={}] cells={} t={:.2}s", n, arr.cells.len(), total);
+    }
+    Some(arr)
 }
 
 // ============================================================================
@@ -300,6 +367,56 @@ fn cell_is_feasible(p: &Vec3, verts: &[Vec3], committed_faces: &[[u32; 3]]) -> b
 fn new_face_conflicts(f: [u32; 3], committed_faces: &[[u32; 3]], verts: &[Vec3]) -> bool {
     for other in committed_faces {
         if triangles_cross(f, *other, verts) { return true; }
+    }
+    false
+}
+
+/// Upper-bound pruning check.  For each edge on placed vertices, count
+/// "alive" triangles — triangles on placed vertices not yet pierced by
+/// any non-incident placed edge.  An edge needs at least 2 clean
+/// triangles in any final polyhedron, drawn from alive placed ones
+/// plus future triangles (one per unplaced vertex).  If alive+future < 2
+/// for any edge, no polyhedron can possibly be extracted.
+fn cannot_reach_polyhedron(verts: &[Vec3], n_target: usize) -> bool {
+    let placed = verts.len();
+    if placed < 3 { return false; }
+    let tol = 1e-9;
+
+    // alive_count[(a,b)] = number of alive placed triangles containing edge (a,b)
+    let mut alive_count: std::collections::HashMap<(u32, u32), u32> =
+        std::collections::HashMap::new();
+    for a in 0..placed {
+        for b in (a + 1)..placed {
+            alive_count.insert((a as u32, b as u32), 0);
+        }
+    }
+
+    for a in 0..placed {
+        for b in (a + 1)..placed {
+            for c in (b + 1)..placed {
+                let ta = &verts[a]; let tb = &verts[b]; let tc = &verts[c];
+                let mut alive = true;
+                'outer: for x in 0..placed {
+                    if x == a || x == b || x == c { continue; }
+                    for y in (x + 1)..placed {
+                        if y == a || y == b || y == c { continue; }
+                        if seg_crosses_tri(&verts[x], &verts[y], ta, tb, tc, tol) {
+                            alive = false; break 'outer;
+                        }
+                    }
+                }
+                if alive {
+                    *alive_count.get_mut(&(a as u32, b as u32)).unwrap() += 1;
+                    *alive_count.get_mut(&(b as u32, c as u32)).unwrap() += 1;
+                    *alive_count.get_mut(&(a as u32, c as u32)).unwrap() += 1;
+                }
+            }
+        }
+    }
+
+    let future = (n_target - placed) as u32;
+    for (_, &alive) in alive_count.iter() {
+        if alive + future < 2 { return true; }
     }
     false
 }
@@ -423,8 +540,17 @@ fn extract_polyhedron(
     let n_selected_forced = forced.len();
     let mut count = n_selected_forced;
     let mut budget: u64 = 2_000_000;
-    if backtrack(&mut selected, &clean_set, &tris_per_edge, n,
-                  &mut edge_count, &mut count, target_f, 0, &mut budget) {
+    let t_ext = Instant::now();
+    let mut last_print = t_ext;
+    let found = backtrack(&mut selected, &clean_set, &tris_per_edge, n,
+                  &mut edge_count, &mut count, target_f, 0, &mut budget,
+                  t_ext, &mut last_print);
+    let total = t_ext.elapsed().as_secs_f64();
+    if total > 1.0 {
+        eprintln!("  [ext done] clean={} forced={} budget_used={} t={:.2}s found={}",
+                  n_clean, n_selected_forced, 2_000_000 - budget, total, found);
+    }
+    if found {
         let out: Vec<[u32; 3]> = selected.iter().enumerate()
             .filter(|&(_, &b)| b).map(|(i, _)| clean_set[i]).collect();
         return (n_clean, Some(out));
@@ -442,9 +568,20 @@ fn backtrack(
     target: usize,
     start: usize,
     budget: &mut u64,
+    t_ext: Instant,
+    last_print: &mut Instant,
 ) -> bool {
     if *budget == 0 { return false; }
     *budget -= 1;
+    // Heartbeat every ~50k budget decrements, once elapsed > 1s.
+    if *budget % 50_000 == 0 {
+        let elapsed = t_ext.elapsed().as_secs_f64();
+        if elapsed > 1.0 && last_print.elapsed().as_secs_f64() >= 0.5 {
+            eprintln!("  [ext bt] t={:.2}s budget_left={} count={}/{} start={}/{}",
+                      elapsed, *budget, *count, target, start, clean.len());
+            *last_print = Instant::now();
+        }
+    }
     if *count == target {
         return edge_count.values().all(|&c| c == 2);
     }
@@ -482,7 +619,7 @@ fn backtrack(
             for k in &keys { *edge_count.entry(*k).or_insert(0) += 1; }
             selected[start] = true; *count += 1;
             if backtrack(selected, clean, tris_per_edge, n_verts, edge_count,
-                          count, target, start + 1, budget) {
+                          count, target, start + 1, budget, t_ext, last_print) {
                 return true;
             }
             selected[start] = false; *count -= 1;
@@ -491,7 +628,7 @@ fn backtrack(
     }
     // Skip branch
     backtrack(selected, clean, tris_per_edge, n_verts, edge_count,
-               count, target, start + 1, budget)
+               count, target, start + 1, budget, t_ext, last_print)
 }
 
 #[derive(Clone, Copy)]
@@ -554,7 +691,14 @@ fn dfs(
 
     let lvl = (verts.len() - 4) as usize;
 
-    let arr = build_arrangement(verts, opts.box_size);
+    let arr = match build_arrangement(verts, opts.box_size, None) {
+        Some(a) => a,
+        None => {
+            stats.record_cells(lvl, 0);
+            eprintln!("  [warn] arrangement cap hit at placed={}", verts.len());
+            return;
+        }
+    };
     let mut feasible: Vec<Vec3> = Vec::new();
     for cell in &arr.cells {
         let c = cell.centroid();
@@ -668,6 +812,148 @@ fn subsets_dfs(
 // main
 // ============================================================================
 
+// ============================================================================
+// Random descent
+// ============================================================================
+
+/// Tiny xorshift PRNG.  No external dependencies.
+struct Xorshift { state: u64 }
+impl Xorshift {
+    fn new(seed: u64) -> Self { Xorshift { state: seed.max(1) } }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x; x
+    }
+    fn pick(&mut self, n: usize) -> usize { (self.next_u64() as usize) % n }
+}
+
+struct DescentResult {
+    level_reached: usize,
+    per_level_cells: Vec<usize>,
+    n_clean: Option<usize>,
+    poly_ok: bool,
+    time_secs: f64,
+    committed_at_level: Vec<usize>,
+    pruned_at_level: Option<usize>, // Some(k) if combinatorial prune fired at level k
+}
+
+/// One random descent: at each level, enumerate feasible cells and
+/// pick exactly ONE uniformly at random.  After placing v_i, if
+/// i < commit_until, randomly commit a subset of the potential new
+/// faces (i, j, k) for j<k<i (subject to edge-budget and geometric
+/// conflict constraints).  No backtracking — if a level has 0 feasible
+/// cells, the descent fails at that level.  At depth `target` we run
+/// the polyhedron extraction.
+fn random_descent(
+    seed: u64,
+    target: usize,
+    box_size: f64,
+    commit_until: usize,
+    use_prune: bool,
+) -> DescentResult {
+    let t0 = Instant::now();
+    let mut rng = Xorshift::new(seed);
+    let mut verts = regular_tetrahedron();
+    let mut committed_faces: Vec<[u32; 3]> = vec![[0, 1, 2], [0, 1, 3]];
+    let mut edge_face_count = EdgeFaceCount::new();
+    for &f in &committed_faces { edge_face_count.inc_face(f); }
+    let mut per_level_cells = Vec::new();
+    let mut committed_at_level: Vec<usize> = Vec::new();
+
+    while verts.len() < target {
+        let arr = match build_arrangement(&verts, box_size, None) {
+            Some(a) => a,
+            None => {
+                eprintln!("  [warn] seed {} arrangement cap hit at placed={}",
+                          seed, verts.len());
+                return DescentResult {
+                    level_reached: verts.len(),
+                    per_level_cells,
+                    n_clean: None,
+                    poly_ok: false,
+                    time_secs: t0.elapsed().as_secs_f64(),
+                    committed_at_level,
+                    pruned_at_level: None,
+                };
+            }
+        };
+        let mut feasible: Vec<Vec3> = Vec::new();
+        for cell in &arr.cells {
+            let c = cell.centroid();
+            if cell_is_feasible(&c, &verts, &committed_faces) { feasible.push(c); }
+        }
+        per_level_cells.push(feasible.len());
+        if feasible.is_empty() {
+            return DescentResult {
+                level_reached: verts.len(),
+                per_level_cells,
+                n_clean: None,
+                poly_ok: false,
+                time_secs: t0.elapsed().as_secs_f64(),
+                committed_at_level,
+                pruned_at_level: None,
+            };
+        }
+        let pick = rng.pick(feasible.len());
+        verts.push(feasible[pick]);
+        let i = (verts.len() - 1) as u32;
+
+        // Random face commitment for v_i when i < commit_until.
+        let mut committed_this_level = 0usize;
+        if (i as usize) < commit_until {
+            let mut potential: Vec<(u32, u32)> = Vec::new();
+            for j in 0..i {
+                for k in (j + 1)..i {
+                    if edge_face_count.get(j, k) < 2 { potential.push((j, k)); }
+                }
+            }
+            for m in (1..potential.len()).rev() {
+                let r = (rng.next_u64() as usize) % (m + 1);
+                potential.swap(m, r);
+            }
+            for &(j, k) in &potential {
+                if edge_face_count.get(j, k) >= 2 { continue; }
+                if edge_face_count.get(i, j) >= 2 { continue; }
+                if edge_face_count.get(i, k) >= 2 { continue; }
+                let face = [i, j, k];
+                if new_face_conflicts(face, &committed_faces, &verts) { continue; }
+                if rng.next_u64() & 1 == 1 {
+                    edge_face_count.inc_face(face);
+                    committed_faces.push(face);
+                    committed_this_level += 1;
+                }
+            }
+        }
+        committed_at_level.push(committed_this_level);
+
+        // Combinatorial upper-bound pruning.
+        if use_prune && cannot_reach_polyhedron(&verts, target) {
+            return DescentResult {
+                level_reached: verts.len(),
+                per_level_cells,
+                n_clean: None,
+                poly_ok: false,
+                time_secs: t0.elapsed().as_secs_f64(),
+                committed_at_level,
+                pruned_at_level: Some(verts.len()),
+            };
+        }
+    }
+    let (n_clean, poly) = extract_polyhedron(&verts, &committed_faces);
+    DescentResult {
+        level_reached: target,
+        per_level_cells,
+        n_clean: Some(n_clean),
+        poly_ok: poly.is_some(),
+        time_secs: t0.elapsed().as_secs_f64(),
+        committed_at_level,
+        pruned_at_level: None,
+    }
+}
+
 fn regular_tetrahedron() -> Vec<Vec3> {
     let s3 = (3f64).sqrt();
     let s6 = (6f64).sqrt();
@@ -679,8 +965,340 @@ fn regular_tetrahedron() -> Vec<Vec3> {
     ]
 }
 
+fn run_random(
+    count: u64, seed_base: u64, target: usize, box_size: f64,
+    commit_until: usize, use_prune: bool,
+) {
+    let t0 = Instant::now();
+    let mut per_level_cells: Vec<Vec<usize>> = Vec::new();
+    let mut committed_per_level: Vec<Vec<usize>> = Vec::new();
+    let mut clean_counts: Vec<usize> = Vec::new();
+    let mut reached_target: u64 = 0;
+    let mut poly_found: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut pruned: u64 = 0;
+    let mut prune_level_hist: std::collections::HashMap<usize, u64> =
+        std::collections::HashMap::new();
+    let mut level_reached_hist: std::collections::HashMap<usize, u64> =
+        std::collections::HashMap::new();
+
+    for i in 0..count {
+        let r = random_descent(seed_base.wrapping_add(i), target, box_size,
+                                 commit_until, use_prune);
+        *level_reached_hist.entry(r.level_reached).or_insert(0) += 1;
+        for (lvl, &cells) in r.per_level_cells.iter().enumerate() {
+            while per_level_cells.len() <= lvl { per_level_cells.push(Vec::new()); }
+            per_level_cells[lvl].push(cells);
+        }
+        for (lvl, &committed) in r.committed_at_level.iter().enumerate() {
+            while committed_per_level.len() <= lvl { committed_per_level.push(Vec::new()); }
+            committed_per_level[lvl].push(committed);
+        }
+        if let Some(k) = r.pruned_at_level {
+            pruned += 1;
+            *prune_level_hist.entry(k).or_insert(0) += 1;
+        }
+        if r.level_reached != target { failed += 1; continue; }
+        reached_target += 1;
+        if r.poly_ok { poly_found += 1; }
+        if let Some(nc) = r.n_clean { clean_counts.push(nc); }
+        if i % 8 == 0 || i == count - 1 {
+            println!("  [{}/{}]  reached_target={}  poly_found={}  pruned={}  elapsed={:.1}s",
+                     i + 1, count, reached_target, poly_found, pruned,
+                     t0.elapsed().as_secs_f64());
+        }
+    }
+
+    let dt = t0.elapsed().as_secs_f64();
+    println!("\n=== Random descent done in {:.2}s ({} attempts) ===", dt, count);
+    println!("  reached depth {}: {}  (failed: {})", target, reached_target, failed);
+    println!("  polyhedra found: {}", poly_found);
+    if use_prune {
+        println!("  pruned by combinatorial check: {}", pruned);
+        if !prune_level_hist.is_empty() {
+            let mut keys: Vec<&usize> = prune_level_hist.keys().collect();
+            keys.sort();
+            println!("  prune-level histogram:");
+            for k in keys {
+                println!("    placed {} verts: {} descents pruned",
+                         k, prune_level_hist[k]);
+            }
+        }
+    }
+    println!("  level_reached histogram:");
+    let mut keys: Vec<&usize> = level_reached_hist.keys().collect();
+    keys.sort();
+    for k in keys {
+        println!("    depth {}: {} descents", k, level_reached_hist[k]);
+    }
+
+    println!("  per-level feasible cell counts (across ALL {} descents):", count);
+    for (lvl, cs) in per_level_cells.iter().enumerate() {
+        if cs.is_empty() { continue; }
+        let mut sorted = cs.clone(); sorted.sort();
+        let min = sorted[0];
+        let max = sorted[sorted.len() - 1];
+        let p50 = sorted[sorted.len() / 2];
+        let mean = cs.iter().sum::<usize>() as f64 / cs.len() as f64;
+        println!("    lvl {} (v{}): min={} p50={} max={} mean={:.1}",
+                 lvl, lvl + 4, min, p50, max, mean);
+    }
+
+    if committed_per_level.iter().any(|v| v.iter().any(|&x| x > 0)) {
+        println!("  faces committed at each level (min/p50/max/mean, n):");
+        for (lvl, cs) in committed_per_level.iter().enumerate() {
+            if cs.is_empty() { continue; }
+            let mut sorted = cs.clone(); sorted.sort();
+            let min = sorted[0];
+            let max = sorted[sorted.len() - 1];
+            let p50 = sorted[sorted.len() / 2];
+            let mean = cs.iter().sum::<usize>() as f64 / cs.len() as f64;
+            println!("    lvl {} (v{}): min={} p50={} max={} mean={:.2}",
+                     lvl, lvl + 4, min, p50, max, mean);
+        }
+    }
+
+    if !clean_counts.is_empty() {
+        let mut sc = clean_counts.clone(); sc.sort();
+        println!("  clean-triangle counts at leaves ({} depth-{} descents):", clean_counts.len(), target);
+        println!("    min={}  p10={}  p25={}  p50={}  p75={}  p90={}  max={}",
+                 sc[0], sc[sc.len()/10], sc[sc.len()/4], sc[sc.len()/2],
+                 sc[sc.len()*3/4], sc[sc.len()*9/10], sc[sc.len()-1]);
+        // Histogram bucketed by 10.
+        let mut hist: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
+        for &v in &clean_counts {
+            let bucket = (v / 10) * 10;
+            *hist.entry(bucket).or_insert(0) += 1;
+        }
+        println!("  clean-count histogram (10-wide buckets):");
+        for (bucket, n) in hist {
+            let bar = "#".repeat((n as usize).min(50));
+            println!("    {:3}-{:3}: {:4}  {}", bucket, bucket + 9, n, bar);
+        }
+    }
+}
+
+// ============================================================================
+// Backtracking random search with prune
+// ============================================================================
+
+struct LevelState {
+    committed_pushed: usize, // face commits added when placing the vertex at this level
+    cells_to_try: Vec<Vec3>, // remaining feasible cells to try at this level
+}
+
+fn shuffle_vec<T>(v: &mut Vec<T>, rng: &mut Xorshift) {
+    for i in (1..v.len()).rev() {
+        let j = (rng.next_u64() as usize) % (i + 1);
+        v.swap(i, j);
+    }
+}
+
+fn feasible_cells_at(
+    verts: &[Vec3], committed: &[[u32; 3]], box_size: f64, mem_limit: Option<u64>,
+) -> Option<Vec<Vec3>> {
+    let arr = build_arrangement(verts, box_size, mem_limit)?;
+    let mut feasible = Vec::new();
+    for cell in &arr.cells {
+        let c = cell.centroid();
+        if cell_is_feasible(&c, verts, committed) { feasible.push(c); }
+    }
+    Some(feasible)
+}
+
+fn backtrack_search(
+    seed: u64, target: usize, box_size: f64, commit_until: usize,
+    deadline_secs: f64, mem_limit_bytes: u64,
+) {
+    let t0 = Instant::now();
+    let mut rng = Xorshift::new(seed);
+    let mut verts = regular_tetrahedron();
+    let mut committed: Vec<[u32; 3]> = vec![[0, 1, 2], [0, 1, 3]];
+    let mut edge_fc = EdgeFaceCount::new();
+    for &f in &committed { edge_fc.inc_face(f); }
+
+    let mut stack: Vec<LevelState> = Vec::new();
+    let mut visits: u64 = 0;          // cells picked (vertex placements attempted)
+    let mut prunes: u64 = 0;          // combinatorial prune aborts
+    let mut cap_hits: u64 = 0;        // arrangement cap aborts
+    let mut target_reached: u64 = 0;  // times depth target reached
+    let mut polys_found: u64 = 0;
+    let mut best_clean: usize = 0;
+    let mut best_poly: Option<Vec<[u32; 3]>> = None;
+    let mut depth_hist: std::collections::BTreeMap<usize, u64> =
+        std::collections::BTreeMap::new();
+    let mut last_report = t0;
+
+    // Prime the search: level-0 feasible cells.
+    match feasible_cells_at(&verts, &committed, box_size, Some(mem_limit_bytes)) {
+        None => { println!("  [fatal] level-0 arrangement cap hit"); return; }
+        Some(mut cells) => {
+            shuffle_vec(&mut cells, &mut rng);
+            stack.push(LevelState { committed_pushed: 0, cells_to_try: cells });
+        }
+    }
+
+    let mut stop_reason = "search exhausted";
+
+    loop {
+        // Deadline & memory checks.
+        let elapsed = t0.elapsed().as_secs_f64();
+        if elapsed > deadline_secs { stop_reason = "time limit"; break; }
+        let rss = current_rss_bytes();
+        if rss > mem_limit_bytes { stop_reason = "memory limit"; break; }
+
+        if last_report.elapsed().as_secs_f64() >= 2.0 {
+            println!(
+                "  t={:>6.1}s  rss={:>5.2}GB  depth={:>2}  stack={:>2}  visits={:>8}  prunes={:>7}  caps={:>5}  tgt={:>5}  polys={}  best_clean={}",
+                elapsed, rss as f64 / (1024.0 * 1024.0 * 1024.0),
+                verts.len(), stack.len(), visits, prunes, cap_hits,
+                target_reached, polys_found, best_clean,
+            );
+            last_report = Instant::now();
+        }
+
+        if stack.is_empty() { stop_reason = "search exhausted"; break; }
+
+        if stack.last().unwrap().cells_to_try.is_empty() {
+            let ls = stack.pop().unwrap();
+            for _ in 0..ls.committed_pushed {
+                let f = committed.pop().unwrap();
+                edge_fc.dec_face(f);
+            }
+            if !stack.is_empty() {
+                // The previous level's vertex came from stack parent; pop it now
+                // (root tetrahedron vertices are never popped).
+                if verts.len() > 4 { verts.pop(); }
+            } else {
+                if verts.len() > 4 { verts.pop(); }
+            }
+            continue;
+        }
+
+        let cand = stack.last_mut().unwrap().cells_to_try.pop().unwrap();
+        visits += 1;
+        verts.push(cand);
+        let i = (verts.len() - 1) as u32;
+
+        // Random face commitment for v_i when i < commit_until.
+        let mut committed_this_level = 0usize;
+        if (i as usize) < commit_until {
+            let mut potential: Vec<(u32, u32)> = Vec::new();
+            for j in 0..i {
+                for k in (j + 1)..i {
+                    if edge_fc.get(j, k) < 2 { potential.push((j, k)); }
+                }
+            }
+            shuffle_vec(&mut potential, &mut rng);
+            for &(j, k) in &potential {
+                if edge_fc.get(j, k) >= 2 { continue; }
+                if edge_fc.get(i, j) >= 2 { continue; }
+                if edge_fc.get(i, k) >= 2 { continue; }
+                let face = [i, j, k];
+                if new_face_conflicts(face, &committed, &verts) { continue; }
+                if rng.next_u64() & 1 == 1 {
+                    edge_fc.inc_face(face);
+                    committed.push(face);
+                    committed_this_level += 1;
+                }
+            }
+        }
+
+        // Combinatorial prune.
+        if cannot_reach_polyhedron(&verts, target) {
+            prunes += 1;
+            *depth_hist.entry(verts.len()).or_insert(0) += 1;
+            for _ in 0..committed_this_level {
+                let f = committed.pop().unwrap();
+                edge_fc.dec_face(f);
+            }
+            verts.pop();
+            continue;
+        }
+
+        // Leaf: extract.
+        if verts.len() == target {
+            target_reached += 1;
+            let (n_clean, poly) = extract_polyhedron(&verts, &committed);
+            if n_clean > best_clean { best_clean = n_clean; }
+            if let Some(p) = poly {
+                polys_found += 1;
+                if best_poly.is_none() { best_poly = Some(p.clone()); }
+                println!("  [!] polyhedron #{} found at visit {} (t={:.1}s), {} faces",
+                         polys_found, visits, t0.elapsed().as_secs_f64(), p.len());
+            }
+            for _ in 0..committed_this_level {
+                let f = committed.pop().unwrap();
+                edge_fc.dec_face(f);
+            }
+            verts.pop();
+            continue;
+        }
+
+        // Descend.
+        match feasible_cells_at(&verts, &committed, box_size, Some(mem_limit_bytes)) {
+            None => {
+                cap_hits += 1;
+                *depth_hist.entry(verts.len()).or_insert(0) += 1;
+                for _ in 0..committed_this_level {
+                    let f = committed.pop().unwrap();
+                    edge_fc.dec_face(f);
+                }
+                verts.pop();
+            }
+            Some(mut cells) => {
+                shuffle_vec(&mut cells, &mut rng);
+                stack.push(LevelState { committed_pushed: committed_this_level, cells_to_try: cells });
+            }
+        }
+    }
+
+    let dt = t0.elapsed().as_secs_f64();
+    let rss = current_rss_bytes();
+    println!("\n=== Backtrack done ({}) ===", stop_reason);
+    println!("  elapsed: {:.2}s  peak_rss: {:.2}GB", dt, rss as f64 / (1024.0 * 1024.0 * 1024.0));
+    println!("  visits (cells picked):      {}", visits);
+    println!("  depth target reached:       {}", target_reached);
+    println!("  combinatorial prunes:       {}", prunes);
+    println!("  arrangement cap aborts:     {}", cap_hits);
+    println!("  polyhedra found:            {}", polys_found);
+    println!("  best clean-tri count seen:  {}", best_clean);
+    println!("  depth-at-abort histogram (prune + cap):");
+    for (k, v) in depth_hist.iter() {
+        println!("    depth {:2}: {} aborts", k, v);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Backtrack mode: cells backtrack <seed> <target> <box> <commit_until> [time_secs] [mem_gb]
+    if args.get(1).map(|s| s.as_str()) == Some("backtrack") {
+        let seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(12345);
+        let target: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(12);
+        let box_size: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(6.0);
+        let commit_until: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(8);
+        let time_secs: f64 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(300.0);
+        let mem_gb: f64 = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(8.0);
+        let mem_limit = (mem_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+        println!("Backtrack: seed={} target={} box={} commit_until={} time={}s mem_limit={}GB",
+                 seed, target, box_size, commit_until, time_secs, mem_gb);
+        backtrack_search(seed, target, box_size, commit_until, time_secs, mem_limit);
+        return;
+    }
+    // Random mode: cells random <count> [seed] [target] [box] [commit_until] [prune]
+    if args.get(1).map(|s| s.as_str()) == Some("random") {
+        let count: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
+        let seed: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(12345);
+        let target: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(12);
+        let box_size: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(6.0);
+        let commit_until: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let use_prune: bool = args.get(7).map(|s| s == "prune" || s == "1" || s == "true").unwrap_or(false);
+        println!("Random descent: count={}, seed_base={}, target={}, box={}, commit_until={}, prune={}",
+                 count, seed, target, box_size, commit_until, use_prune);
+        run_random(count, seed, target, box_size, commit_until, use_prune);
+        return;
+    }
+
     let target = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(6);
     let commit_until = args.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(target);
     let box_size: f64 = args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(6.0);
