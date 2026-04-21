@@ -17,4 +17,10 @@ scan.log
 scan_par.log
 rot6.log
 intensive.log
+lowpinch_opt.log
+lp2_opt.log
+find_low_pinch.log
 n12_deep*
+n12_lowpinch*
+n12_lp*
+low_pinch*.pkl

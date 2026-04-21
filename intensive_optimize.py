@@ -29,7 +29,7 @@ def _worker_env():
 def _do_run(args):
     _worker_env()
     (seed, faces_json_list, steps, batch, lr, tau_start, tau_end,
-     chunk_size, restart_every) = args
+     chunk_size, restart_every, tag) = args
 
     from itertools import combinations
     import numpy as np
@@ -110,6 +110,8 @@ def _do_run(args):
 
     return {
         "seed": seed,
+        "tag": tag,
+        "faces": faces_json_list,
         "best_n_ix": best_ix_global,
         "best_vertices": best_verts_global.tolist() if best_verts_global is not None else None,
     }
@@ -117,10 +119,18 @@ def _do_run(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="n12_21.json",
-                    help="JSON with 'vertices' and 'faces' (only 'faces' is used)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--input", default=None,
+                   help="JSON with 'vertices' and 'faces' (only 'faces' is used). "
+                        "One structure, K workers each with different random init.")
+    g.add_argument("--pickle", default=None,
+                   help="Pickle from find_low_pinch.py; dispatches the top --top-k "
+                        "structures across workers.")
+    ap.add_argument("--top-k", type=int, default=8,
+                    help="When reading a pickle, run this many top-ranked structures.")
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--seeds-per-worker", type=int, default=1)
+    ap.add_argument("--seeds-per-worker", type=int, default=1,
+                    help="When reading a single JSON, # random inits per worker.")
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=5e-3)
@@ -134,18 +144,40 @@ def main():
     ap.add_argument("--out", default="n12_deep")
     args = ap.parse_args()
 
-    data = json.load(open(args.input))
-    faces = [list(f) for f in data["faces"]]
-    print(f"Input {args.input}: current_n_ix={data.get('real_intersections', '?')}, "
-          f"{len(faces)} faces")
+    structures = []  # list of (tag, faces_list)
+    if args.pickle:
+        import pickle as _pickle
+        with open(args.pickle, "rb") as fh:
+            ranked = _pickle.load(fh)
+        top = ranked[:args.top_k]
+        print(f"Read {len(ranked)} structures from {args.pickle}; using top {len(top)}:")
+        for i, r in enumerate(top):
+            tag = f"pickle#{i}_pinch{r['pinch_count']}_excess{r['excess_components']}"
+            print(f"  {tag}")
+            structures.append((tag, [list(f) for f in r["faces"]]))
+    else:
+        inp = args.input or "n12_21.json"
+        data = json.load(open(inp))
+        faces = [list(f) for f in data["faces"]]
+        print(f"Input {inp}: current_n_ix={data.get('real_intersections', '?')}, "
+              f"{len(faces)} faces")
+        structures.append((os.path.basename(inp), faces))
 
     work = []
-    for w in range(args.workers):
-        for k in range(args.seeds_per_worker):
-            seed = args.start_seed + w * 1000 + k
+    if args.pickle:
+        # One work item per structure (one seed each).
+        for i, (tag, faces) in enumerate(structures):
+            seed = args.start_seed + i
             work.append((seed, faces, args.steps, args.batch, args.lr,
                          args.tau_start, args.tau_end, args.chunk_size,
-                         args.restart_every))
+                         args.restart_every, tag))
+    else:
+        for w in range(args.workers):
+            for k in range(args.seeds_per_worker):
+                seed = args.start_seed + w * 1000 + k
+                work.append((seed, structures[0][1], args.steps, args.batch, args.lr,
+                             args.tau_start, args.tau_end, args.chunk_size,
+                             args.restart_every, structures[0][0]))
 
     print(f"running {len(work)} deep optimizations across {args.workers} workers, "
           f"{args.steps} steps each")
@@ -158,7 +190,7 @@ def main():
             if best is None or r["best_n_ix"] < best["best_n_ix"]:
                 best = r
                 marker = "  ***"
-            print(f"[{i+1}/{len(work)}] seed {r['seed']}: n_ix={r['best_n_ix']}"
+            print(f"[{i+1}/{len(work)}] tag={r.get('tag','')}: n_ix={r['best_n_ix']}"
                   f"{marker}", flush=True)
     dt = time.time() - t0
     print(f"\ntotal {dt:.1f}s")
@@ -166,11 +198,11 @@ def main():
 
     if best and best["best_vertices"]:
         v = np.asarray(best["best_vertices"], dtype=np.float32)
-        faces_t = [tuple(f) for f in faces]
+        faces_t = [tuple(f) for f in best["faces"]]
         np.save(f"{args.out}_vertices.npy", v)
         np.save(f"{args.out}_faces.npy", np.asarray(faces_t, dtype=np.int32))
         with open(f"{args.out}.obj", "w") as fh:
-            fh.write(f"# K_12 genus-6 (deep optimize from {args.input})\n")
+            fh.write(f"# K_12 genus-6 (deep optimize, best={best['best_n_ix']} ix)\n")
             for p in v: fh.write(f"v {p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
             for f in faces_t: fh.write(f"f {f[0]+1} {f[1]+1} {f[2]+1}\n")
         with open(f"{args.out}.json", "w") as fh:
@@ -179,7 +211,7 @@ def main():
                 "vertices": v.tolist(),
                 "faces": [list(f) for f in faces_t],
                 "real_intersections": best["best_n_ix"],
-                "derived_from": args.input,
+                "tag": best.get("tag", ""),
                 "best_seed": best["seed"],
             }, fh, indent=2)
         print(f"wrote {args.out}_vertices.npy, {args.out}_faces.npy, {args.out}.obj, {args.out}.json")
