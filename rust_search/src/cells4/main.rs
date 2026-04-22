@@ -17,6 +17,22 @@ mod zone;
 
 use arrangement::Arrangement;
 
+fn write_obj(p: &enumerate::PolyResult, path: &str) -> std::io::Result<()> {
+    use std::fmt::Write;
+    let mut s = String::new();
+    writeln!(&mut s, "# cells4 — found Csaszar polyhedron candidate").ok();
+    writeln!(&mut s, "# clean count: {}", p.clean_count).ok();
+    writeln!(&mut s, "# path:        {:?}", p.path).ok();
+    for c in &p.placed_coords {
+        writeln!(&mut s, "v {:.6} {:.6} {:.6}", c[0], c[1], c[2]).ok();
+    }
+    for f in &p.faces {
+        // OBJ is 1-indexed.
+        writeln!(&mut s, "f {} {} {}", f[0] + 1, f[1] + 1, f[2] + 1).ok();
+    }
+    std::fs::write(path, s)
+}
+
 fn serde_json_encode(polys: &[enumerate::PolyResult]) -> Result<String, std::fmt::Error> {
     use std::fmt::Write;
     let mut out = String::from("[\n");
@@ -96,6 +112,10 @@ fn main() {
                 let _ = std::fs::write("/tmp/cells4_polys.json", json);
                 println!();
                 println!("  wrote /tmp/cells4_polys.json ({} polyhedra)", distinct.len());
+            }
+            // First distinct also gets an OBJ for quick viewing.
+            if write_obj(&distinct[0], "/tmp/cells4_first.obj").is_ok() {
+                println!("  wrote /tmp/cells4_first.obj (vertices + faces)");
             }
         }
         return;
