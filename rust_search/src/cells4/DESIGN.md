@@ -25,6 +25,67 @@ interior cell):
 1-3-6, 1-4-6, 2-3-6, 2-4-5, 2-5-6, 3-4-5
 ```
 
+## Pipeline (as implemented)
+
+```
+cells4 enumerate <N> <time_limit_s> <max_paths> [--parallel]
+
+                     ┌──────────────────────────┐
+                     │ hardcoded tet arrangement │
+                     │  (tet.rs — 15 cells)      │
+                     └──────────────┬───────────┘
+                                    │ pick cell → next v
+                                    ▼
+              ┌────────────────────────────────────┐
+              │  extend_chirotope (arrangement.rs) │  ← combinatorial
+              └──────────────────┬─────────────────┘
+                                 │
+                                 ▼
+              ┌───────────────────────────────────────┐
+              │ zone::add_plane_coord_assisted for    │  ← COORD-assisted
+              │ each new triple-plane (v_new, a, b)   │     (uncertainty
+              └──────────────────┬────────────────────┘     oracle)
+                                 │
+                          at N = target:
+                                 ▼
+              ┌────────────────────────────────────────┐
+              │ piercing::edge_pierces_triangle         │  ← combinatorial
+              │ (χ-based 4-sign test per pair)          │
+              └──────────────────┬──────────────────────┘
+                                 ▼
+              ┌────────────────────────────────────────┐
+              │ enumerate::extract_polyhedron          │  ← combinatorial
+              │   1. clean-triangle filter             │
+              │   2. 2-factor backtrack                │
+              │   3. vertex-link manifold check        │
+              └──────────────────┬──────────────────────┘
+                                 ▼
+              ┌────────────────────────────────────────┐
+              │ validate::topology (Euler, genus, …)   │  ← combinatorial
+              └────────────────────────────────────────┘
+```
+
+Secondary primitives:
+- `split.rs`: first-cut combinatorial split (placed-corner signs) —
+  diagnostic.
+- `gp.rs`: Grassmann-Plücker primitive (4×4 plane determinant) — ready
+  for a fully-combinatorial split using the OM extension theory but
+  not yet wired in; zone.rs currently handles splits with coords.
+
+## Gotchas and lessons
+
+- **2-factor alone ≠ polyhedron.**  At N=9 we observed face-sets
+  satisfying "every edge in 2 faces" that fail the manifold test
+  (v_0's link is two disconnected 4-cycles).  Must explicitly check
+  vertex links are single cycles.
+- **χ(0,1,2,3) sign depends on coord convention**; hardcode χ on sorted
+  4-tuples, and pin the convention with a coord-agreement test
+  (`coords::tet_chirotope_has_chi_0123_positive`).
+- **σ convention flips sv vs plane.value**: sv(p, α, β, γ) =
+  −‖n‖·Plane::through(α,β,γ).value(p).  We chose σ = +1 ⇔ χ > 0 ⇔ sv > 0
+  ⇔ plane.value < 0.  Get this wrong and the tet's 15 cells' signs
+  are all reversed (we verified this costly lesson on first build).
+
 ## Decisions (user, 2026-04-22 night)
 
 1. **No face committing at all** for the first cut. Skip entirely; no anchor faces.
