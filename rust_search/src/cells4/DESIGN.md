@@ -1,5 +1,30 @@
 # cells4 — purely combinatorial arrangement search
 
+## Results (2026-04-22)
+
+**At N = 7 in a 10-minute enumeration**:
+- 22,788 leaves completed
+- 7,133 clean polyhedra found (= valid K_7 face-sets realised by our
+  coord witnesses, every edge in exactly 2 faces, every vertex in
+  exactly 6 faces)
+- **120 distinct face-sets** after deduplication
+- 889 combinatorial prunes, 4,096 LP witness failures
+- Best clean-triangle count per leaf: 28 out of 35 K_7 triangles.
+
+The 120 distinct face-sets is exactly **7! / |Aut(Csaszar)| = 5040/42
+= 120**, matching the known order-42 automorphism group of the Csaszar
+polyhedron.  Every polyhedron we found is a re-labelling of the
+Csaszar polyhedron — the unique K_7 torus triangulation that embeds in
+R^3 as a non-self-intersecting polyhedron.  The combinatorial pipeline
+recovered the full labeling orbit.
+
+First distinct polyhedron's faces (path [0, 0, 13] from the tet
+interior cell):
+```
+0-1-2, 0-1-5, 0-2-3, 0-3-4, 0-4-6, 0-5-6, 1-2-4, 1-3-5,
+1-3-6, 1-4-6, 2-3-6, 2-4-5, 2-5-6, 3-4-5
+```
+
 ## Decisions (user, 2026-04-22 night)
 
 1. **No face committing at all** for the first cut. Skip entirely; no anchor faces.
