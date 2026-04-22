@@ -13,6 +13,7 @@ mod gp;
 mod piercing;
 mod split;
 mod tet;
+mod validate;
 mod zone;
 
 use arrangement::Arrangement;
@@ -117,6 +118,17 @@ fn main() {
             if write_obj(&distinct[0], "/tmp/cells4_first.obj").is_ok() {
                 println!("  wrote /tmp/cells4_first.obj (vertices + faces)");
             }
+            // Topology check on the first distinct.
+            let topo = validate::topology(&distinct[0].faces);
+            println!();
+            println!("  topology of first distinct polyhedron:");
+            println!("    V = {}, E = {}, F = {}", topo.vertices, topo.edges, topo.faces);
+            println!("    Euler characteristic: {}", topo.euler);
+            println!("    genus: {:?}", topo.genus);
+            println!("    every edge in 2 faces: {}", topo.all_edges_covered_twice);
+            let degrees: std::collections::BTreeMap<_,_> = topo.faces_per_vertex.iter().collect();
+            let all_six = degrees.values().all(|&&c| c == 6);
+            println!("    every vertex in 6 faces: {}", all_six);
         }
         return;
     }
