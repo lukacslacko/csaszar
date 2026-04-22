@@ -28,6 +28,7 @@ pub struct EnumerateStats {
     pub best_clean_count: usize,
     pub total_leaves: u64,
     pub lp_failures: u64,
+    pub prunes: u64,
     pub polyhedra: Vec<PolyResult>,
 }
 
@@ -90,6 +91,44 @@ pub fn add_vertex_from_cell(
     }
     arr.n_placed = v_new + 1;
     Ok(())
+}
+
+/// Combinatorial upper-bound prune: each edge of K_N at the final
+/// depth must be in exactly 2 clean triangles.  An upper bound on
+/// that count is (alive_triangles_at_current_N_containing_edge) +
+/// (remaining_vertex_additions).  If this bound < 2 for any edge,
+/// the path is doomed.  All signs come from χ — no coordinates.
+pub fn cannot_reach_polyhedron(arr: &Arrangement, n_target: u32) -> bool {
+    let n_cur = arr.n_placed;
+    if n_cur < 3 { return false; }
+    let future = (n_target - n_cur) as u32;
+    for a in 0..n_cur {
+        for b in (a + 1)..n_cur {
+            let mut alive = 0u32;
+            for c in 0..n_cur {
+                if c == a || c == b { continue; }
+                if triangle_is_clean(&arr.chi, n_cur, a, b, c) { alive += 1; }
+            }
+            if alive + future < 2 { return true; }
+        }
+    }
+    false
+}
+
+fn triangle_is_clean(
+    chi: &crate::chirotope::Chirotope, n: u32,
+    a: VertId, b: VertId, c: VertId,
+) -> bool {
+    let mut tri = [a, b, c]; tri.sort();
+    let (ta, tb, tc) = (tri[0], tri[1], tri[2]);
+    for x in 0..n {
+        if x == ta || x == tb || x == tc { continue; }
+        for y in (x + 1)..n {
+            if y == ta || y == tb || y == tc { continue; }
+            if edge_pierces_triangle(chi, x, y, ta, tb, tc) { return false; }
+        }
+    }
+    true
 }
 
 /// Combinatorial piercing table at a given N.
@@ -297,8 +336,15 @@ fn enumerate_rec(
         let mut path_next = path.clone();
         path_next.push(ci);
         match add_vertex_from_cell(&mut arr_next, ci, &mut coords_next) {
-            Ok(()) => enumerate_rec(arr_next, coords_next, path_next, target, stats,
-                                      t0, time_limit, max_paths),
+            Ok(()) => {
+                // Prune doomed branches combinatorially.
+                if cannot_reach_polyhedron(&arr_next, target) {
+                    stats.prunes += 1;
+                } else {
+                    enumerate_rec(arr_next, coords_next, path_next, target, stats,
+                                    t0, time_limit, max_paths);
+                }
+            }
             Err(_) => { stats.lp_failures += 1; }
         }
         if t0.elapsed().as_secs_f64() > time_limit { return; }

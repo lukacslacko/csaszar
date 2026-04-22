@@ -70,6 +70,7 @@ fn main() {
         println!("  total leaves:       {}", stats.total_leaves);
         println!("  paths completed:    {}", stats.paths_completed);
         println!("  LP failures:        {}", stats.lp_failures);
+        println!("  combinatorial prunes: {}", stats.prunes);
         println!("  best clean count:   {}", stats.best_clean_count);
         println!("  polyhedra found:    {}", stats.polyhedra_found);
         let distinct = stats.distinct_polyhedra();
