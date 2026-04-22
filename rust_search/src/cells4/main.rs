@@ -16,6 +16,29 @@ mod zone;
 
 use arrangement::Arrangement;
 
+fn serde_json_encode(polys: &[enumerate::PolyResult]) -> Result<String, std::fmt::Error> {
+    use std::fmt::Write;
+    let mut out = String::from("[\n");
+    for (pi, p) in polys.iter().enumerate() {
+        write!(out, "  {{\n    \"path\": {:?},\n    \"clean_count\": {},\n    \"coords\": [",
+               p.path, p.clean_count)?;
+        for (i, c) in p.placed_coords.iter().enumerate() {
+            if i > 0 { out.push_str(", "); }
+            write!(out, "[{:.6}, {:.6}, {:.6}]", c[0], c[1], c[2])?;
+        }
+        out.push_str("],\n    \"faces\": [");
+        for (i, f) in p.faces.iter().enumerate() {
+            if i > 0 { out.push_str(", "); }
+            write!(out, "[{}, {}, {}]", f[0], f[1], f[2])?;
+        }
+        out.push_str("]\n  }");
+        if pi + 1 < polys.len() { out.push_str(","); }
+        out.push('\n');
+    }
+    out.push_str("]\n");
+    Ok(out)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -49,15 +72,28 @@ fn main() {
         println!("  LP failures:        {}", stats.lp_failures);
         println!("  best clean count:   {}", stats.best_clean_count);
         println!("  polyhedra found:    {}", stats.polyhedra_found);
-        if stats.polyhedra_found > 0 {
+        let distinct = stats.distinct_polyhedra();
+        println!("  distinct (by face-set): {}", distinct.len());
+        if !distinct.is_empty() {
             println!();
-            println!("  first polyhedron:");
-            let p = &stats.polyhedra[0];
+            println!("  first distinct polyhedron:");
+            let p = &distinct[0];
             println!("    path:        {:?}", p.path);
             println!("    clean count: {}", p.clean_count);
             println!("    faces ({}):", p.faces.len());
             for f in &p.faces {
                 println!("      [{}, {}, {}]", f[0], f[1], f[2]);
+            }
+            println!();
+            println!("  coords of first distinct polyhedron:");
+            for (i, c) in p.placed_coords.iter().enumerate() {
+                println!("    v{}: [{:.6}, {:.6}, {:.6}]", i, c[0], c[1], c[2]);
+            }
+            // Dump all distinct polys to a json file for later.
+            if let Ok(json) = serde_json_encode(&distinct) {
+                let _ = std::fs::write("/tmp/cells4_polys.json", json);
+                println!();
+                println!("  wrote /tmp/cells4_polys.json ({} polyhedra)", distinct.len());
             }
         }
         return;

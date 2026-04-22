@@ -31,6 +31,26 @@ pub struct EnumerateStats {
     pub polyhedra: Vec<PolyResult>,
 }
 
+impl EnumerateStats {
+    /// Collapse polyhedra by face-set equality; returns the number of
+    /// distinct face sets and a representative per set.
+    pub fn distinct_polyhedra(&self) -> Vec<PolyResult> {
+        let mut seen: std::collections::HashSet<Vec<[VertId; 3]>> =
+            std::collections::HashSet::new();
+        let mut out: Vec<PolyResult> = Vec::new();
+        for p in &self.polyhedra {
+            let mut key: Vec<[VertId; 3]> = p.faces.iter().map(|t| {
+                let mut s = *t; s.sort(); s
+            }).collect();
+            key.sort();
+            if seen.insert(key) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PolyResult {
     pub path: Vec<usize>,         // cell-index choices v_4, v_5, …
