@@ -10,9 +10,51 @@ pub struct TopoStats {
     pub faces: usize,
     pub euler: i64,
     pub genus: Option<i64>,
+    pub crosscaps: Option<i64>,
     pub faces_per_vertex: HashMap<VertId, usize>,
     pub faces_per_edge: HashMap<[VertId; 2], usize>,
     pub all_edges_covered_twice: bool,
+    pub is_2_manifold: bool,
+    pub non_manifold_vertices: Vec<VertId>,
+}
+
+/// Check if the link of vertex v is a single cycle.  For a 2-manifold
+/// triangulation, this must be true at every vertex.
+pub fn vertex_link_is_cycle(v: VertId, faces: &[[VertId; 3]]) -> bool {
+    // Collect edges of the link (pairs of "other" vertices).
+    let mut link_edges: Vec<(VertId, VertId)> = Vec::new();
+    for f in faces {
+        if !f.contains(&v) { continue; }
+        let others: Vec<VertId> = f.iter().filter(|&&x| x != v).copied().collect();
+        debug_assert_eq!(others.len(), 2);
+        link_edges.push((others[0], others[1]));
+    }
+    if link_edges.is_empty() { return false; }
+    let link_verts: HashSet<VertId> =
+        link_edges.iter().flat_map(|&(a, b)| [a, b]).collect();
+    // Degree of each link vertex must be 2 (for a simple cycle).
+    let mut deg: HashMap<VertId, usize> = HashMap::new();
+    for &(a, b) in &link_edges {
+        *deg.entry(a).or_insert(0) += 1;
+        *deg.entry(b).or_insert(0) += 1;
+    }
+    if deg.values().any(|&d| d != 2) { return false; }
+    // Connectedness: BFS should reach all link vertices.
+    let mut adj: HashMap<VertId, Vec<VertId>> = HashMap::new();
+    for &(a, b) in &link_edges {
+        adj.entry(a).or_default().push(b);
+        adj.entry(b).or_default().push(a);
+    }
+    let start = *link_verts.iter().next().unwrap();
+    let mut seen: HashSet<VertId> = HashSet::new();
+    seen.insert(start);
+    let mut stack = vec![start];
+    while let Some(u) = stack.pop() {
+        for &w in adj.get(&u).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if seen.insert(w) { stack.push(w); }
+        }
+    }
+    seen.len() == link_verts.len()
 }
 
 pub fn topology(faces: &[[VertId; 3]]) -> TopoStats {
@@ -35,23 +77,53 @@ pub fn topology(faces: &[[VertId; 3]]) -> TopoStats {
     let e = edges.len();
     let f_count = faces.len();
     let euler = v as i64 - e as i64 + f_count as i64;
+    // Orientable: χ = 2 - 2g ⇒ g = (2 - χ)/2
     let genus = if (2 - euler) % 2 == 0 { Some((2 - euler) / 2) } else { None };
+    // Non-orientable: χ = 2 - k ⇒ k = 2 - χ  (any integer)
+    let crosscaps = Some(2 - euler);
     let all_twice = faces_per_edge.values().all(|&c| c == 2);
+
+    // 2-manifold check: every vertex link is a single cycle.
+    let mut non_manifold_vertices: Vec<VertId> = Vec::new();
+    for &v in &verts {
+        if !vertex_link_is_cycle(v, faces) {
+            non_manifold_vertices.push(v);
+        }
+    }
+    non_manifold_vertices.sort();
+    let is_manifold = all_twice && non_manifold_vertices.is_empty();
+
     TopoStats {
         vertices: v,
         edges: e,
         faces: f_count,
         euler,
         genus,
+        crosscaps,
         faces_per_vertex,
         faces_per_edge,
         all_edges_covered_twice: all_twice,
+        is_2_manifold: is_manifold,
+        non_manifold_vertices,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_cycle_for_csaszar_is_true() {
+        let faces: Vec<[VertId; 3]> = vec![
+            [0,1,2], [0,1,5], [0,2,3], [0,3,4], [0,4,6], [0,5,6],
+            [1,2,4], [1,3,5], [1,3,6], [1,4,6], [2,3,6], [2,4,5],
+            [2,5,6], [3,4,5],
+        ];
+        for v in 0..7u32 {
+            assert!(vertex_link_is_cycle(v, &faces),
+                    "v_{} link isn't a cycle in Csaszar", v);
+        }
+    }
 
     #[test]
     fn first_found_csaszar_is_genus_1() {

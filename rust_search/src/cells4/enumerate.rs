@@ -212,6 +212,15 @@ pub fn extract_polyhedron(
     if ok {
         let out: Vec<[VertId; 3]> = selected.iter().enumerate()
             .filter(|&(_, &b)| b).map(|(i, _)| clean[i]).collect();
+        // Manifold filter: every vertex link must be a single cycle.
+        // A 2-factor on clean triangles guarantees each edge is in two
+        // faces but can still leave non-manifold vertices (two cycles
+        // through one vertex).
+        for v in 0..n {
+            if !crate::validate::vertex_link_is_cycle(v, &out) {
+                return (n_clean, None);
+            }
+        }
         return (n_clean, Some(out));
     }
     (n_clean, None)
