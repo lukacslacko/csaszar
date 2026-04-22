@@ -129,6 +129,19 @@ fn main() {
             let degrees: std::collections::BTreeMap<_,_> = topo.faces_per_vertex.iter().collect();
             let all_six = degrees.values().all(|&&c| c == 6);
             println!("    every vertex in 6 faces: {}", all_six);
+
+            // Cross-check: all distinct polyhedra share the same topology.
+            let mut by_genus: std::collections::BTreeMap<Option<i64>, u32> =
+                std::collections::BTreeMap::new();
+            for p in &distinct {
+                let t = validate::topology(&p.faces);
+                *by_genus.entry(t.genus).or_insert(0) += 1;
+            }
+            println!();
+            println!("  all distinct polyhedra — genus distribution:");
+            for (g, c) in &by_genus {
+                println!("    genus {:?}: {} polyhedra", g, c);
+            }
         }
         return;
     }
