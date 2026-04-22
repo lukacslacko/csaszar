@@ -18,6 +18,10 @@ path = "src/cells2/main.rs"
 name = "cells3"
 path = "src/cells3/main.rs"
 
+[[bin]]
+name = "cells4"
+path = "src/cells4/main.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
