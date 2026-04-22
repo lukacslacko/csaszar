@@ -9,6 +9,7 @@ mod cell;
 mod chirotope;
 mod coords;
 mod piercing;
+mod split;
 mod tet;
 
 use arrangement::Arrangement;
