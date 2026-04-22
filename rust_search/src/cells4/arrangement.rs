@@ -8,6 +8,7 @@
 use crate::cell::{Cell, Plane, PlaneId};
 use crate::chirotope::{Chirotope, VertId};
 
+#[derive(Clone)]
 pub struct Arrangement {
     pub n_placed: u32,
     pub chi: Chirotope,
