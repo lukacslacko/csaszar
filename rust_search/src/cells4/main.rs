@@ -9,6 +9,7 @@ mod cell;
 mod chirotope;
 mod coords;
 mod enumerate;
+mod gp;
 mod piercing;
 mod split;
 mod tet;
