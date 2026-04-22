@@ -296,6 +296,65 @@ pub fn enumerate(target: u32, time_limit_secs: f64, max_paths: u64) -> Enumerate
     stats
 }
 
+/// Parallel enumeration: spawn one thread per initial tet-cell choice
+/// (15 total), merge their results.  Wall time saving ~num_cores.
+pub fn enumerate_parallel(
+    target: u32,
+    time_limit_secs: f64,
+    max_paths_per_thread: u64,
+) -> EnumerateStats {
+    let t0 = Instant::now();
+    let arr0 = Arrangement::new_tetrahedron();
+    let coords0: Vec<Vec3> = tet_coords().to_vec();
+    let n_initial = arr0.cells.len();
+
+    let handles: Vec<_> = (0..n_initial).map(|ci| {
+        let arr = arr0.clone();
+        let coords = coords0.clone();
+        let tlim = time_limit_secs;
+        let cap = max_paths_per_thread;
+        std::thread::spawn(move || {
+            let mut local = EnumerateStats::default();
+            let t0_local = Instant::now();
+            let mut arr_next = arr.clone();
+            let mut coords_next = coords.clone();
+            let mut path_next: Vec<usize> = vec![ci];
+            match add_vertex_from_cell(&mut arr_next, ci, &mut coords_next) {
+                Ok(()) => {
+                    if !cannot_reach_polyhedron(&arr_next, target) {
+                        enumerate_rec(arr_next, coords_next, path_next, target,
+                                        &mut local, t0_local, tlim, cap);
+                    } else {
+                        local.prunes += 1;
+                    }
+                }
+                Err(_) => { local.lp_failures += 1; }
+            }
+            local
+        })
+    }).collect();
+
+    let mut combined = EnumerateStats::default();
+    for h in handles {
+        match h.join() {
+            Ok(local) => {
+                combined.paths_completed += local.paths_completed;
+                combined.polyhedra_found += local.polyhedra_found;
+                combined.total_leaves += local.total_leaves;
+                combined.lp_failures += local.lp_failures;
+                combined.prunes += local.prunes;
+                if local.best_clean_count > combined.best_clean_count {
+                    combined.best_clean_count = local.best_clean_count;
+                }
+                combined.polyhedra.extend(local.polyhedra);
+            }
+            Err(_) => {}
+        }
+    }
+    let _ = t0.elapsed();
+    combined
+}
+
 fn enumerate_rec(
     arr: Arrangement,
     coords: Vec<Vec3>,

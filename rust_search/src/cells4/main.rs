@@ -83,7 +83,13 @@ fn main() {
         let max_paths: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
         println!("cells4 enumerate: target=N={} time_limit={}s max_paths={}",
                  target, time_limit, max_paths);
-        let stats = enumerate::enumerate(target, time_limit, max_paths);
+        let parallel = args.iter().any(|a| a == "--parallel");
+        let stats = if parallel {
+            println!("  (parallel mode: 8 threads, 1 per initial tet cell subset)");
+            enumerate::enumerate_parallel(target, time_limit, max_paths / 8)
+        } else {
+            enumerate::enumerate(target, time_limit, max_paths)
+        };
         println!();
         println!("  total leaves:       {}", stats.total_leaves);
         println!("  paths completed:    {}", stats.paths_completed);
