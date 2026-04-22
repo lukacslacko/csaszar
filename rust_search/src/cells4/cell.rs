@@ -66,6 +66,14 @@ pub struct Cell {
     /// Friendly human name (e.g. "interior", "edge(0,1)", "v_3-cone")
     /// for the hard-coded tet; empty for derived cells.
     pub label: String,
+    /// Indices of placed vertices that are corners (0-faces) on the
+    /// boundary of this cell.  For the tet's hard-coded cells, these
+    /// are the tet vertices lying on the cell's closure; for a derived
+    /// cell, this is populated from the parent cell's corners minus
+    /// those cut away by the splitting plane.  Generic
+    /// 3-plane-intersection corners (not placed vertices) are tracked
+    /// separately — see DESIGN.md for the plan.
+    pub placed_corners: Vec<VertId>,
 }
 
 // --------------------------------------------------------------------------

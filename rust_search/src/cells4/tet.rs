@@ -42,27 +42,31 @@ pub fn tet_cells() -> Vec<Cell> {
     // Derived by evaluating sign(plane.value(witness)) under the
     // Plane::through((α,β,γ)) normal convention n = (β−α)×(γ−α), with
     // σ = +1 ⇔ sv > 0 ⇔ plane.value < 0 (since sv = −|n|·plane.value).
-    let rows: &[(&str, [i8; 4])] = &[
-        ("interior",        [-1,  1, -1,  1]),
-        ("face-opp-v0",     [-1,  1, -1, -1]),
-        ("face-opp-v1",     [-1,  1,  1,  1]),
-        ("face-opp-v2",     [-1, -1, -1,  1]),
-        ("face-opp-v3",     [ 1,  1, -1,  1]),
-        ("edge(0,1)",       [ 1, -1, -1,  1]),
-        ("edge(0,2)",       [ 1,  1,  1,  1]),
-        ("edge(0,3)",       [-1, -1,  1,  1]),
-        ("edge(1,2)",       [ 1,  1, -1, -1]),
-        ("edge(1,3)",       [-1, -1, -1, -1]),
-        ("edge(2,3)",       [-1,  1,  1, -1]),
-        ("vertex-v0-cone",  [ 1, -1,  1,  1]),
-        ("vertex-v1-cone",  [ 1, -1, -1, -1]),
-        ("vertex-v2-cone",  [ 1,  1,  1, -1]),
-        ("vertex-v3-cone",  [-1, -1,  1, -1]),
+    // `placed_corners` lists the tet vertices that lie on the cell's
+    // closure (for the tet arrangement, all arrangement vertices are
+    // placed vertices).
+    let rows: &[(&str, [i8; 4], &[u32])] = &[
+        ("interior",        [-1,  1, -1,  1], &[0, 1, 2, 3]),
+        ("face-opp-v0",     [-1,  1, -1, -1], &[1, 2, 3]),
+        ("face-opp-v1",     [-1,  1,  1,  1], &[0, 2, 3]),
+        ("face-opp-v2",     [-1, -1, -1,  1], &[0, 1, 3]),
+        ("face-opp-v3",     [ 1,  1, -1,  1], &[0, 1, 2]),
+        ("edge(0,1)",       [ 1, -1, -1,  1], &[0, 1]),
+        ("edge(0,2)",       [ 1,  1,  1,  1], &[0, 2]),
+        ("edge(0,3)",       [-1, -1,  1,  1], &[0, 3]),
+        ("edge(1,2)",       [ 1,  1, -1, -1], &[1, 2]),
+        ("edge(1,3)",       [-1, -1, -1, -1], &[1, 3]),
+        ("edge(2,3)",       [-1,  1,  1, -1], &[2, 3]),
+        ("vertex-v0-cone",  [ 1, -1,  1,  1], &[0]),
+        ("vertex-v1-cone",  [ 1, -1, -1, -1], &[1]),
+        ("vertex-v2-cone",  [ 1,  1,  1, -1], &[2]),
+        ("vertex-v3-cone",  [-1, -1,  1, -1], &[3]),
     ];
     rows.iter()
-        .map(|(label, signs)| Cell {
+        .map(|(label, signs, corners)| Cell {
             sign: SignVec::from_signs(signs),
             label: label.to_string(),
+            placed_corners: corners.to_vec(),
         })
         .collect()
 }

@@ -34,6 +34,49 @@ Conventions pinned at implementation time:
 
 The test harness shadows each operation with a coordinate realisation and asserts equivalence.
 
+## User's matrix formulation → oriented matroid extension
+
+The user's intuition (2026-04-22 night, after Phase A commit): cells can
+be described by {−1, 0, +1} matrices where each column corresponds to a
+placed vertex and each row to a plane-side constraint; a new vertex adds
+a new column that references the existing matrix; cell-cut feasibility
+becomes a satisfiability check on integer sign matrices, no floats.
+
+This is exactly the **oriented matroid** framework expressed matrixwise:
+- Each row of the matrix is a "covector" (equivalently, signs of the
+  cell on a set of bounding plane-sides).
+- Extension by a new vertex ↔ adding a new element to the OM ↔ adding a
+  new "localisation" (the σ of the cell that hosts v_new).
+- The satisfiability question "is this extended sign pattern realised by
+  some 3-D point?" is OM **realisability of the extension**.
+
+For realizable OMs — ours, by construction — the test reduces to a
+finite propagation on 4-tuple chirotope signs via the Grassmann–Plücker
+3-term identity. Explicitly, for any 5 placed indices p_1, …, p_5 in
+3-D, there's an affine relation with signed coefficients
+
+    λ_i = (−1)^{i−1} · χ(p_1, …, p̂_i, …, p_5)
+
+and the OM axiom demands the 5 λ_i's have mixed signs. This pins down
+any single unknown χ entry given the other four. Our unknown when
+asking "does plane P = plane(v_new, v_a, v_b) cut cell C'?" is
+
+    χ(v_new, v_a, v_b, p)   with p some representative of C'
+
+which lies in a 5-tuple (v_new, v_a, v_b, v_c, p) for each placed v_c,
+giving one equation per v_c. Combined with the cell's σ' (known
+χ(p, placed triple) values), propagation resolves the unknown for every
+cell — or detects the mixed-sign case (cell is cut).
+
+**Why this isn't a one-night implementation**: the propagation has to be
+a fixed point of dozens of GP identities simultaneously, plus careful
+treatment of the 0-sign (degenerate) cases where a corner sits exactly
+on the new plane. It needs unit tests against the coordinate harness at
+every chirotope entry and extends to maintaining a face-lattice
+structure across the 6 plane additions of a single vertex-step. Rough
+estimate: 7–10 focused days, with high error risk around sign
+conventions.
+
 ## The combinatorial split — plan
 
 For each cell C' with sign vector σ' and new plane P:

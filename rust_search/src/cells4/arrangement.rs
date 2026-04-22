@@ -54,6 +54,27 @@ impl Arrangement {
     pub fn n_cells(&self) -> usize { self.cells.len() }
 }
 
+/// Sign of the new plane P = plane(v_new, v_a, v_b) at placed vertex
+/// v_k, reading from the extended chirotope.  Return 0 iff v_k is on
+/// the plane (i.e. v_k ∈ {v_new, v_a, v_b}).
+///
+/// By convention σ[plane(α, β, γ)] at point p = +1 iff χ(p, α, β, γ) > 0,
+/// with (α, β, γ) sorted ascending.  For the new plane we sort
+/// {v_new, v_a, v_b} and query the corresponding 4-point chirotope entry.
+pub fn sign_of_new_plane_at_placed(
+    chi: &crate::chirotope::Chirotope,
+    v_new: VertId, v_a: VertId, v_b: VertId,
+    v_k: VertId,
+) -> i8 {
+    if v_k == v_new || v_k == v_a || v_k == v_b { return 0; }
+    // σ[plane(α, β, γ)] at p = +1 ⇔ χ(p, α, β, γ) > 0 where (α, β, γ)
+    // is the sorted canonical triple.  Sort {v_new, v_a, v_b} before
+    // querying χ so we get the canonical σ convention.
+    let mut triple = [v_new, v_a, v_b];
+    triple.sort();
+    chi.get(v_k, triple[0], triple[1], triple[2])
+}
+
 // --------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------
@@ -69,6 +90,47 @@ mod tests {
         let arr = Arrangement::new_tetrahedron();
         assert_eq!(arr.n_cells(), N_TET_CELLS);
         assert_eq!(arr.planes.len(), 4);
+    }
+
+    /// For every placed tet vertex v_k, the combinatorial
+    /// `sign_of_new_plane_at_placed` must match the sign you'd get by
+    /// evaluating the geometric plane through (v_new, v_a, v_b) at v_k.
+    /// This pins down the primitive that the combinatorial split will
+    /// call in a loop.
+    #[test]
+    fn sign_at_placed_vertex_matches_geometry() {
+        use crate::coords::{chirotope_from_coords, sign_of_point_vs_plane, tet_coords, Vec3};
+
+        // Extend coords with a specific v_new, then compare combinatorial
+        // sign-at-placed-vertex to the geometric sign-of-plane at each
+        // placed tet vertex for every pair (a, b).
+        let mut coords = tet_coords().to_vec();
+        let v_new: Vec3 = [0.3, 0.2, 0.1]; // inside the tet, in interior cell
+        coords.push(v_new);
+        let chi = chirotope_from_coords(&coords);
+        let new_id = 4u32;
+
+        for a in 0..4u32 {
+            for b in (a + 1)..4u32 {
+                // Sort the new plane's triple as canonical.
+                let mut triple = [new_id, a, b];
+                triple.sort();
+                for k in 0..4u32 {
+                    let combo = super::sign_of_new_plane_at_placed(&chi, new_id, a, b, k);
+                    if k == a || k == b {
+                        assert_eq!(combo, 0, "v_{} is on plane({}, {}, {}); expected 0", k, new_id, a, b);
+                    } else {
+                        let geom = sign_of_point_vs_plane(
+                            &coords[k as usize], &coords,
+                            triple[0], triple[1], triple[2],
+                        );
+                        assert_eq!(combo, geom,
+                            "sign mismatch at v_{} vs plane({},{},{}): combo={}, geom={}",
+                            k, triple[0], triple[1], triple[2], combo, geom);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
