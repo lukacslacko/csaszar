@@ -126,6 +126,26 @@ mod tests {
     }
 
     #[test]
+    fn n9_first_found_is_pseudo_manifold() {
+        // From the N=9 parallel 10-min run: this face-set satisfies
+        // the 2-factor property but has a non-manifold vertex v_0
+        // whose link splits into two 4-cycles {1-2, 1-8, 2-3, 3-8}
+        // and {4-6, 4-7, 5-6, 5-7}.
+        let faces: Vec<[VertId; 3]> = vec![
+            [0,1,2], [0,1,8], [0,2,3], [0,3,8], [0,4,6], [0,4,7],
+            [0,5,6], [0,5,7], [1,2,6], [1,3,4], [1,3,7], [1,4,5],
+            [1,5,6], [1,7,8], [2,3,5], [2,4,7], [2,4,8], [2,5,7],
+            [2,6,8], [3,4,6], [3,5,8], [3,6,7], [4,5,8], [6,7,8],
+        ];
+        let topo = topology(&faces);
+        assert_eq!(topo.faces, 24);
+        assert!(topo.all_edges_covered_twice, "2-factor property OK");
+        assert!(!topo.is_2_manifold, "should fail manifold filter");
+        assert!(topo.non_manifold_vertices.contains(&0),
+                "v_0 should be a non-manifold vertex");
+    }
+
+    #[test]
     fn first_found_csaszar_is_genus_1() {
         // Same face list as the first distinct polyhedron we find at N=7.
         let faces: Vec<[VertId; 3]> = vec![
